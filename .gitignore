@@ -1,0 +1,31 @@
+# Build directories
+build/
+cmake-build-*/
+out/
+*.o
+*.obj
+*.exe
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Compiled binaries
+metrics-pipeline
+main
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Dependency managers
+vcpkg_installed/
+conan/
+
+# Runtime artifacts
+*.log
+*.sqlite
+*.db
