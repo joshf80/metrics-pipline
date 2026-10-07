@@ -1,7 +1,9 @@
-#include "http_request.hpp"
 #include "tcp_server.hpp"
+#include "message.hpp"
+#include "common.hpp"
 
 #include <sys/socket.h>
+#include <sys/epoll.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <cstdint>
@@ -11,79 +13,90 @@
 #include <unistd.h>
 #include <string_view>
 
-void runTcpServer() {
-    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sockfd < 0) {
-        std::cerr << "Failed to create socket" << std::endl;
-        exit(EXIT_FAILURE);
-    }
-    struct sockaddr_in sockaddr{};
-    sockaddr.sin_family = AF_INET;
-    sockaddr.sin_port = htons(8080);
-    sockaddr.sin_addr.s_addr = INADDR_ANY;
+struct Options {
+    uint64_t expect = 1000000;
+    int workers = 1;
+    int io_cpu = -1;
+    int worker_cpu_base = -1;
+    uint16_t port = 9000;
+    std::string queue = "mutex";
+};
 
-    if (bind(sockfd, reinterpret_cast<struct sockaddr*>(&sockaddr), sizeof(sockaddr)) < 0) {
-        std::cerr << "Failed to bind socket to port 8080" << std::endl;
-        exit(EXIT_FAILURE);
-    }
-
-    if (listen(sockfd, 15) < 0) {
-        std::cerr << "Failed to listen on socket" << std::endl;
-        exit(EXIT_FAILURE);
-    }
-    
-    std::cout << "Server is listening on port 8080" << std::endl;
-    while (true) {
-        struct sockaddr_in clientAddr{};
-        socklen_t addrlen = sizeof(clientAddr);
-        int connection = accept(sockfd, reinterpret_cast<struct sockaddr*>(&clientAddr), &addrlen);
-        if (connection < 0) {
-            std::cerr << "Failed to accept connection" << std::endl;
-            continue;
-        }
-        char address[INET_ADDRSTRLEN];
-        if(inet_ntop(AF_INET, &clientAddr.sin_addr, address, sizeof(address)) == nullptr) {
-            std::cerr << "Failed to convert client IP address" << std::endl;
+static Options parse_args(int argc, char* argv[]) { // will switch out to using file based program parameters
+    Options opts;
+    for(int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--expect") {
+            opts.expect = std::stoull(argv[++i]);
+        } else if (arg == "--workers") {
+            opts.workers = std::stoi(argv[++i]);
+        } else if (arg == "--io-cpu") {
+            opts.io_cpu = std::stoi(argv[++i]);
+        } else if (arg == "--worker-cpu-base") {
+            opts.worker_cpu_base = std::stoi(argv[++i]);
+        } else if (arg == "--port") {
+            opts.port = static_cast<uint16_t>(std::stoi(argv[++i]));
+        } else if (arg == "--queue") {
+            opts.queue = argv[++i];
         } else {
-            std::cout << "Client IP Address: " << address << std::endl;
+            std::cerr << "Unknown argument: " << arg << std::endl;
         }
+    }
+    return opts;
+}
 
-        std::cout << "Client Port: " << ntohs(clientAddr.sin_port) << std::endl;
-        char buffer[1024];
-        ssize_t bytesReceived;
-        uint64_t totalBytes = 0;
-        std::string received;
-        bool headerComplete = false;
-        while ((bytesReceived = read(connection, buffer, sizeof(buffer))) > 0) {
-            received.append(buffer, static_cast<std::size_t>(bytesReceived));
-            std::cout.write(buffer, bytesReceived);
-            std::cout.flush();
-            totalBytes += static_cast<uint64_t>(bytesReceived);
-            if (std::string_view(received).find("\r\n\r\n") != std::string_view::npos) {
-                headerComplete = true;
-                break;
+static inline void handle_event(const Message& m, uint64_t& sink) {
+    for(uint8_t i = 0; i < sizeof(m.payload); ++i) {
+        sink += m.payload[i];
+    }
+}
+
+static std::pair<int, int> make_listener(uint16_t port) {
+    int fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
+    if (fd < 0) die("socket");
+
+    struct sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    addr.sin_addr.s_addr = INADDR_ANY;
+
+    if (bind(fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
+        die("bind");
+    }
+
+    if (listen(fd, 15) < 0) {
+        die("listen");
+    }
+
+    int epollfd = epoll_create1(0); 
+    if(epollfd < 0) {
+        die("epoll instance");
+    }
+
+    epoll_event ev{};
+    ev.events = EPOLLIN;
+    ev.data.fd = fd;
+    if(epoll_ctl(epollfd, EPOLL_CTL_ADD, fd, &ev) < 0) {
+        die("epoll_ctl");
+    }
+
+    return {epollfd, fd};
+}
+
+void runTcpServer() {
+    std::pair<int, int> listener = make_listener(8080);
+    int epollfd = listener.first;
+    int listenfd = listener.second;
+
+    epoll_event events[128];
+    while(true) {
+        int nfds = epoll_wait(epollfd, events, 128, -1);
+        for(int i = 0; i < nfds; ++i) {
+            int fd = events[i].data.fd;
+            if(events[i].data.fd == listenfd) {
+                // accept connections and
             }
         }
-        if (headerComplete) {
-            const auto requestLine = parseHttpRequestLine(received);
-            if (requestLine) {
-                std::cout << "Request: " << requestLine->method << ' '
-                          << requestLine->path << ' ' << requestLine->version << std::endl;
-            }
-            const std::string response = requestLine
-                ? "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 13\r\n\r\nHello, client!"
-                : "HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\nContent-Length: 12\r\n\r\nBad Request\n";
-            write(connection, response.c_str(), response.size());
-        } 
-        if(!headerComplete) {
-            if(bytesReceived == 0) {
-                std::cout << "Client has disconnected" << std::endl;
-            } else if (bytesReceived < 0) {
-                std::cerr << "Failed to read from client" << std::endl;
-            }
-        }
-        std::cout << "Total bytes received: " << totalBytes << std::endl;
         
-        close(connection);
     }
 }

@@ -11,7 +11,6 @@ find_package(Threads REQUIRED)
 set(SOURCES 
     src/main.cpp
     src/tcp_server.cpp
-    src/http_request.cpp
     src/thread_pool.cpp
 )
 
