@@ -6,12 +6,16 @@
 #include <sys/epoll.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <cerrno>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <string>
 #include <unistd.h>
 #include <string_view>
+#include <unordered_map>
+#include <vector>
 
 struct Options {
     uint64_t expect = 1000000;
@@ -83,20 +87,100 @@ static std::pair<int, int> make_listener(uint16_t port) {
     return {epollfd, fd};
 }
 
-void runTcpServer() {
-    std::pair<int, int> listener = make_listener(8080);
+void runTcpServer(int argc, char* argv[]) {
+    Options opts = parse_args(argc, argv);
+    std::pair<int, int> listener = make_listener(opts.port);
     int epollfd = listener.first;
     int listenfd = listener.second;
 
     epoll_event events[128];
+    std::unordered_map<int, std::vector<uint8_t>> client_buffers;
+    uint64_t sink = 0;
+
     while(true) {
         int nfds = epoll_wait(epollfd, events, 128, -1);
+        if(nfds < 0) {
+            if(errno == EINTR) continue;
+            die("epoll_wait");
+        }
+
         for(int i = 0; i < nfds; ++i) {
             int fd = events[i].data.fd;
-            if(events[i].data.fd == listenfd) {
-                // accept connections and
+            if(fd == listenfd) {
+                while(true) {
+                    sockaddr_in clientAddr{};
+                    socklen_t addrlen = sizeof(clientAddr);
+                    int clientfd = accept4(
+                        listenfd,
+                        reinterpret_cast<sockaddr*>(&clientAddr),
+                        &addrlen,
+                        SOCK_NONBLOCK | SOCK_CLOEXEC
+                    );
+
+                    if(clientfd < 0) {
+                        if(errno == EINTR) continue;
+                        if(errno == EAGAIN || errno == EWOULDBLOCK) break;
+                        die("accept4");
+                    }
+
+                    epoll_event clientEvent{};
+                    clientEvent.events = EPOLLIN | EPOLLRDHUP;
+                    clientEvent.data.fd = clientfd;
+                    if(epoll_ctl(epollfd, EPOLL_CTL_ADD, clientfd, &clientEvent) < 0) {
+                        close(clientfd);
+                        die("epoll_ctl client");
+                    }
+                    client_buffers.emplace(clientfd, std::vector<uint8_t>{});
+                }
+                continue;
+            }
+
+            auto clientIt = client_buffers.find(fd);
+            if(clientIt == client_buffers.end()) continue;
+
+            bool closeClient = false;
+            uint8_t received[4096];
+            while(true) {
+                ssize_t nread = recv(fd, received, sizeof(received), 0);
+                if(nread > 0) {
+                    auto& buffer = clientIt->second;
+                    buffer.insert(buffer.end(), received, received + nread);
+
+                    size_t consumed = 0;
+                    while(buffer.size() - consumed >= sizeof(Message)) {
+                        Message message{};
+                        std::memcpy(&message, buffer.data() + consumed, sizeof(message));
+                        handle_event(message, sink);
+                        consumed += sizeof(message);
+                    }
+                    if(consumed > 0) {
+                        buffer.erase(buffer.begin(), buffer.begin() + consumed);
+                    }
+                    continue;
+                }
+
+                if(nread == 0) {
+                    closeClient = true;
+                    break;
+                }
+                if(errno == EINTR) continue;
+                if(errno == EAGAIN || errno == EWOULDBLOCK) break;
+                perror("recv");
+                closeClient = true;
+                break;
+            }
+
+            if(events[i].events & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) {
+                closeClient = true;
+            }
+            if(closeClient) {
+                if(epoll_ctl(epollfd, EPOLL_CTL_DEL, fd, nullptr) < 0 &&
+                   errno != ENOENT && errno != EBADF) {
+                    perror("epoll_ctl remove client");
+                }
+                close(fd);
+                client_buffers.erase(clientIt);
             }
         }
-        
     }
 }

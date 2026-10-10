@@ -1,3 +1,3 @@
 #pragma once
 
-void runTcpServer();
+void runTcpServer(int argc, char* argv[]);
