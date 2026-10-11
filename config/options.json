@@ -1,0 +1,8 @@
+{
+	"expect": 1000000,
+	"workers": 1,
+	"io_cpu": -1,
+	"worker_cpu_base": -1,
+	"port": 9000,
+	"queue": "mutex"
+}

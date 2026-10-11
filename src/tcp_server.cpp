@@ -16,37 +16,81 @@
 #include <string_view>
 #include <unordered_map>
 #include <vector>
+#include <limits>
+#include <stdexcept>
+#include "simdjson.h"
 
-struct Options {
-    uint64_t expect = 1000000;
-    int workers = 1;
-    int io_cpu = -1;
-    int worker_cpu_base = -1;
-    uint16_t port = 9000;
-    std::string queue = "mutex";
-};
+Options loadOptions(std::string_view path) {
+    simdjson::dom::parser parser;
+    simdjson::dom::element document;
+    auto error = parser.load(path).get(document);
+    if (error) {
+        throw std::runtime_error(
+            "cannot parse options file '" + std::string(path) + "': " +
+            simdjson::error_message(error)
+        );
+    }
 
-static Options parse_args(int argc, char* argv[]) { // will switch out to using file based program parameters
-    Options opts;
-    for(int i = 1; i < argc; ++i) {
-        std::string arg = argv[i];
-        if (arg == "--expect") {
-            opts.expect = std::stoull(argv[++i]);
-        } else if (arg == "--workers") {
-            opts.workers = std::stoi(argv[++i]);
-        } else if (arg == "--io-cpu") {
-            opts.io_cpu = std::stoi(argv[++i]);
-        } else if (arg == "--worker-cpu-base") {
-            opts.worker_cpu_base = std::stoi(argv[++i]);
-        } else if (arg == "--port") {
-            opts.port = static_cast<uint16_t>(std::stoi(argv[++i]));
-        } else if (arg == "--queue") {
-            opts.queue = argv[++i];
+    simdjson::dom::object object;
+    error = document.get_object().get(object);
+    if (error) {
+        throw std::runtime_error(
+            "options file must contain a JSON object: " +
+            std::string(simdjson::error_message(error))
+        );
+    }
+
+    Options options;
+    for (const auto field : object) {
+        const std::string_view key = field.key;
+        if (key == "expect") {
+            uint64_t value;
+            error = field.value.get_uint64().get(value);
+            if (error) {
+                throw std::runtime_error("option 'expect' must be an unsigned integer");
+            }
+            options.expect = value;
+        } else if (key == "workers") {
+            int64_t value;
+            error = field.value.get_int64().get(value);
+            if (error || value < 1 || value > std::numeric_limits<int>::max()) {
+                throw std::runtime_error("option 'workers' must be a positive integer");
+            }
+            options.workers = static_cast<int>(value);
+        } else if (key == "io_cpu" || key == "worker_cpu_base") {
+            int64_t value;
+            error = field.value.get_int64().get(value);
+            if (error || value < std::numeric_limits<int>::min() ||
+                value > std::numeric_limits<int>::max()) {
+                throw std::runtime_error(
+                    "option '" + std::string(key) + "' must be an integer"
+                );
+            }
+            if (key == "io_cpu") {
+                options.io_cpu = static_cast<int>(value);
+            } else {
+                options.worker_cpu_base = static_cast<int>(value);
+            }
+        } else if (key == "port") {
+            uint64_t value;
+            error = field.value.get_uint64().get(value);
+            if (error || value == 0 || value > std::numeric_limits<uint16_t>::max()) {
+                throw std::runtime_error("option 'port' must be between 1 and 65535");
+            }
+            options.port = static_cast<uint16_t>(value);
+        } else if (key == "queue") {
+            std::string_view value;
+            error = field.value.get_string().get(value);
+            if (error) {
+                throw std::runtime_error("option 'queue' must be a string");
+            }
+            options.queue = value;
         } else {
-            std::cerr << "Unknown argument: " << arg << std::endl;
+            throw std::runtime_error("unknown option '" + std::string(key) + "'");
         }
     }
-    return opts;
+
+    return options;
 }
 
 static inline void handle_event(const Message& m, uint64_t& sink) {
@@ -87,9 +131,8 @@ static std::pair<int, int> make_listener(uint16_t port) {
     return {epollfd, fd};
 }
 
-void runTcpServer(int argc, char* argv[]) {
-    Options opts = parse_args(argc, argv);
-    std::pair<int, int> listener = make_listener(opts.port);
+void runTcpServer(const Options& options) {
+    std::pair<int, int> listener = make_listener(options.port);
     int epollfd = listener.first;
     int listenfd = listener.second;
 
