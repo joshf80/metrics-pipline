@@ -28,4 +28,13 @@ Each message is exactly 64 bytes (one cache line):
 
 The server parses `config/options.json` once at startup, before calling
 `runTcpServer()`. Invalid or unreadable configuration stops startup with an
-error; JSON parsing is not performed in the server event loop.
+error.  JSON parsing is not performed in the server event loop.
+Set `queue` to `mutex` or `spsc` to select the queue-policy path at startup.
+These are selection tags only for now; queue implementations and worker/queue
+initialization have not been added yet.
+
+### TODO List:
+
+- Think about backpressure policy for worker queues
+- Add option for worker wait policy (busy poll/block)
+- handle byte stream more realistically (handle garbage bytes)

@@ -1,3 +1,4 @@
+#pragma once
 #include <stdexcept>
 
 [[noreturn]] static inline void die(const char* msg) {

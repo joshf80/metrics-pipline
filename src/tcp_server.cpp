@@ -84,7 +84,15 @@ Options loadOptions(std::string_view path) {
             if (error) {
                 throw std::runtime_error("option 'queue' must be a string");
             }
-            options.queue = value;
+            if (value == "mutex") {
+                options.queue = QueueImplementation::mutex;
+            } else if (value == "spsc") {
+                options.queue = QueueImplementation::spsc;
+            } else {
+                throw std::runtime_error(
+                    "option 'queue' must be either 'mutex' or 'spsc'"
+                );
+            }
         } else {
             throw std::runtime_error("unknown option '" + std::string(key) + "'");
         }
@@ -131,7 +139,14 @@ static std::pair<int, int> make_listener(uint16_t port) {
     return {epollfd, fd};
 }
 
-void runTcpServer(const Options& options) {
+
+namespace {
+
+struct MutexQueueSelection {};
+struct SpscQueueSelection {};
+
+template <typename QueueSelection>
+void runTcpServerWithQueue(const Options& options) {
     std::pair<int, int> listener = make_listener(options.port);
     int epollfd = listener.first;
     int listenfd = listener.second;
@@ -226,4 +241,19 @@ void runTcpServer(const Options& options) {
             }
         }
     }
+}
+
+} // namespace
+
+void runTcpServer(const Options& options) {
+    switch (options.queue) {
+        case QueueImplementation::mutex:
+            runTcpServerWithQueue<MutexQueueSelection>(options);
+            return;
+        case QueueImplementation::spsc:
+            runTcpServerWithQueue<SpscQueueSelection>(options);
+            return;
+    }
+
+    throw std::runtime_error("unsupported queue implementation");
 }
