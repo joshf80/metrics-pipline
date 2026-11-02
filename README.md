@@ -1,40 +1,64 @@
- ## Real Time Metrics Pipeline
+# Real Time Metrics Pipeline
 
-A latency sensitive ingestion pipeline built in C++20. It receives events over TCP, normalizes them into a common schema, hands them to worker threads through bounded queues, with end to end measurements.
-
+A C++ TCP server for ingesting fixed-size metric messages.
 
 ## Architecture
- 
-```
-client --TCP--> IO thread --push--> queue[i] --pop--> worker[i]
-                (epoll, framing,                      (process, record latency)
-                 recv timestamp)
+
+```text
+Clients → TCP → epoll-based server → message framing → message handler
 ```
 
-### Wire format
- 
-Each message is exactly 64 bytes (one cache line):
- 
-| Field | Size | Notes |
-|---|---:|---|
-| seq | 8 | Sender's sequence number |
-| send_ts_ns | 8 | Stamped by the sender just before `send()` |
-| recv_ts_ns | 8 | Filled in by the server after framing (sender writes 0) |
-| type | 4 | |
-| flags | 4 | |
-| payload | 32 | |
+## Message format
 
-### Configuration
+Messages use the `Message` struct defined in `include/message.hpp`.
 
-The server parses `config/options.json` once at startup, before calling
-`runTcpServer()`. Invalid or unreadable configuration stops startup with an
-error.  JSON parsing is not performed in the server event loop.
-Set `queue` to `mutex` or `spsc` to select the queue-policy path at startup.
-These are selection tags only for now; queue implementations and worker/queue
-initialization have not been added yet.
+| Field | Size (bytes) |
+|---|---:|
+| `time` | 8 |
+| `type` | 4 |
+| `id` | 4 |
+| `payload` | 32 |
+| `flags` | 1 |
 
-### TODO List:
+## Load generator
 
-- Think about backpressure policy for worker queues
-- Add option for worker wait policy (busy poll/block)
-- handle byte stream more realistically (handle garbage bytes)
+`metrics-loadgen` opens concurrent nonblocking TCP connections and sends valid
+raw `Message` frames to the server. It uses `epoll` rather than one thread per
+connection, and reports completed frames, bytes accepted by local sockets,
+throughput, and connection failures. The server does not acknowledge messages,
+so these figures measure traffic sent, not confirmed server processing.
+
+Start the server in one terminal:
+
+```sh
+cmake --build build-clang --target metrics-pipeline metrics-loadgen
+./build-clang/metrics-pipeline
+```
+
+In another terminal, run a maximum-throughput test:
+
+```sh
+./build-clang/metrics-loadgen --host 127.0.0.1 --port 9000 \
+  --clients 1000 --duration 60
+```
+
+On systems with a low open-file limit, raise the limit in both the server and
+load-generator terminals before starting them (for example, `ulimit -n 10000`).
+The limit must accommodate the listening/epoll descriptors and every client
+socket. Linux also clamps the listen backlog to its `net.core.somaxconn` limit.
+
+To offer a rate-limited total traffic rate instead, add `--rate`:
+
+```sh
+./build-clang/metrics-loadgen --clients 1000 --duration 60 --rate 50000
+```
+
+Options are `--host`, `--port`, `--clients`, `--duration`, and `--rate`;
+`--help` prints defaults and usage. Omitting `--rate` runs at maximum
+throughput.]
+
+Run tests from the build directory with:
+
+```sh
+ctest --test-dir build-clang --output-on-failure
+```

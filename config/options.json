@@ -4,5 +4,5 @@
 	"io_cpu": -1,
 	"worker_cpu_base": -1,
 	"port": 9000,
-	"queue": "mutex"
+	"queue": "spsc"
 }

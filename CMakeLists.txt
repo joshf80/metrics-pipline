@@ -1,12 +1,11 @@
-cmake_minimum_required(VERSION 3.10.0)
+cmake_minimum_required(VERSION 3.20.0)
 project(metrics-pipeline VERSION 0.1.0 LANGUAGES C CXX)
-set(CMAKE_CXX_STANDARD 26)
+set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(THREADS_PREFER_PTHREAD_FLAG true)
 
-find_package(SQLite3 REQUIRED)
-find_package(Threads REQUIRED)
 include(FetchContent)
 
 FetchContent_Declare(
@@ -34,4 +33,16 @@ target_compile_options(metrics-pipeline PRIVATE -Wall -Wextra -Wpedantic)
 if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
     target_compile_options(metrics-pipeline PRIVATE -std=c++2c)
 endif()
-target_link_libraries(metrics-pipeline PRIVATE SQLite::SQLite3 Threads::Threads simdjson)
+target_link_libraries(metrics-pipeline PRIVATE simdjson)
+
+add_executable(metrics-loadgen tests/simulator.cpp)
+target_include_directories(metrics-loadgen PRIVATE include)
+target_compile_options(metrics-loadgen PRIVATE -Wall -Wextra -Wpedantic)
+
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(message-framing-tests tests/message_framing.cpp)
+    target_include_directories(message-framing-tests PRIVATE include)
+    target_compile_options(message-framing-tests PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME message-framing-tests COMMAND message-framing-tests)
+endif()

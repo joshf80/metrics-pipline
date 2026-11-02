@@ -1,6 +1,7 @@
 # Build directories
 build/
 cmake-build-*/
+build-clang/
 out/
 *.o
 *.obj
@@ -9,6 +10,7 @@ out/
 # IDE
 .idea/
 .vscode/
+.cache/
 *.swp
 *.swo
 *~

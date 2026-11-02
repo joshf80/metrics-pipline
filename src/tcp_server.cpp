@@ -1,5 +1,6 @@
 #include "tcp_server.hpp"
 #include "message.hpp"
+#include "message_framing.hpp"
 #include "common.hpp"
 
 #include <sys/socket.h>
@@ -9,13 +10,11 @@
 #include <cerrno>
 #include <cstdint>
 #include <cstdlib>
-#include <cstring>
 #include <iostream>
 #include <string>
 #include <unistd.h>
 #include <string_view>
 #include <unordered_map>
-#include <vector>
 #include <limits>
 #include <stdexcept>
 #include "simdjson.h"
@@ -120,7 +119,7 @@ static std::pair<int, int> make_listener(uint16_t port) {
         die("bind");
     }
 
-    if (listen(fd, 15) < 0) {
+    if (listen(fd, SOMAXCONN) < 0) {
         die("listen");
     }
 
@@ -152,7 +151,7 @@ void runTcpServerWithQueue(const Options& options) {
     int listenfd = listener.second;
 
     epoll_event events[128];
-    std::unordered_map<int, std::vector<uint8_t>> client_buffers;
+    std::unordered_map<int, message_framing::Buffer> client_buffers;
     uint64_t sink = 0;
 
     while(true) {
@@ -188,7 +187,7 @@ void runTcpServerWithQueue(const Options& options) {
                         close(clientfd);
                         die("epoll_ctl client");
                     }
-                    client_buffers.emplace(clientfd, std::vector<uint8_t>{});
+                    client_buffers.emplace(clientfd, message_framing::Buffer{});
                 }
                 continue;
             }
@@ -202,18 +201,13 @@ void runTcpServerWithQueue(const Options& options) {
                 ssize_t nread = recv(fd, received, sizeof(received), 0);
                 if(nread > 0) {
                     auto& buffer = clientIt->second;
-                    buffer.insert(buffer.end(), received, received + nread);
-
-                    size_t consumed = 0;
-                    while(buffer.size() - consumed >= sizeof(Message)) {
-                        Message message{};
-                        std::memcpy(&message, buffer.data() + consumed, sizeof(message));
-                        handle_event(message, sink);
-                        consumed += sizeof(message);
-                    }
-                    if(consumed > 0) {
-                        buffer.erase(buffer.begin(), buffer.begin() + consumed);
-                    }
+                    buffer.append(
+                        received,
+                        static_cast<std::size_t>(nread),
+                        [&sink](const Message& message) {
+                            handle_event(message, sink);
+                        }
+                    );
                     continue;
                 }
 
@@ -243,7 +237,7 @@ void runTcpServerWithQueue(const Options& options) {
     }
 }
 
-} // namespace
+}
 
 void runTcpServer(const Options& options) {
     switch (options.queue) {
