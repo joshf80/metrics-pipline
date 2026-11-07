@@ -8,7 +8,6 @@
 #include <unistd.h>
 
 #include <algorithm>
-#include <array>
 #include <cerrno>
 #include <charconv>
 #include <chrono>
@@ -16,7 +15,6 @@
 #include <cstdint>
 #include <cstring>
 #include <iostream>
-#include <limits>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -27,7 +25,7 @@
 namespace {
 
 using Clock = std::chrono::steady_clock;
-constexpr std::size_t write_budget = 256 * 1024;
+constexpr std::size_t datagram_budget = 256 * 1024 / sizeof(Message);
 constexpr uint64_t max_timer_expirations_per_wakeup = 10'000;
 
 struct Options {
@@ -40,10 +38,8 @@ struct Options {
 
 struct Client {
     int fd = -1;
-    bool connecting = true;
-    bool connected = false;
+    bool active = false;
     bool pending = false;
-    std::size_t offset = 0;
     uint32_t next_id = 0;
     uint64_t random_state = 1;
     uint32_t epoll_events = 0;
@@ -51,9 +47,9 @@ struct Client {
 };
 
 struct Statistics {
-    uint64_t connect_failures = 0;
-    uint64_t connection_errors = 0;
-    uint64_t completed_frames = 0;
+    uint64_t client_failures = 0;
+    uint64_t send_errors = 0;
+    uint64_t sent_datagrams = 0;
     uint64_t sent_bytes = 0;
     uint64_t skipped_rate_slots = 0;
 };
@@ -80,9 +76,9 @@ Options parseOptions(int argc, char** argv) {
                 << "Usage: metrics-loadgen [options]\n"
                 << "  --host HOST       server hostname or IP (default 127.0.0.1)\n"
                 << "  --port PORT       server port (default 9000)\n"
-                << "  --clients COUNT   concurrent TCP connections (default 100)\n"
+                << "  --clients COUNT   concurrent UDP client sockets (default 100)\n"
                 << "  --duration SEC    test duration in seconds (default 10)\n"
-                << "  --rate MSG/SEC    total offered messages per second; omit for max throughput\n";
+                << "  --rate MSG/SEC    total offered datagrams per second; omit for max throughput\n";
             std::exit(0);
         }
 
@@ -115,7 +111,7 @@ Options parseOptions(int argc, char** argv) {
         usageError("--duration must be between 1 and 86400 seconds");
     }
     if (options.rate_per_second > 1'000'000'000) {
-        usageError("--rate must not exceed 1000000000 messages per second");
+        usageError("--rate must not exceed 1000000000 datagrams per second");
     }
     return options;
 }
@@ -131,7 +127,9 @@ class LoadGenerator {
 public:
     explicit LoadGenerator(const Options& options) : options_(options) {
         epoll_fd_ = epoll_create1(EPOLL_CLOEXEC);
-        if (epoll_fd_ < 0) throw std::system_error(errno, std::generic_category(), "epoll_create1");
+        if (epoll_fd_ < 0) {
+            throw std::system_error(errno, std::generic_category(), "epoll_create1");
+        }
 
         if (options_.rate_per_second != 0) {
             timer_fd_ = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
@@ -153,14 +151,12 @@ public:
     }
 
     int run() {
-        connectClients();
+        createClients();
         if (timer_fd_ >= 0) configureRateTimer();
+
         const auto started = Clock::now();
         const auto deadline = started + std::chrono::seconds(options_.duration_seconds);
-
-        while (Clock::now() < deadline) {
-            if (active_connections_ == 0 && pending_connections_ == 0) break;
-
+        while (Clock::now() < deadline && active_clients_ != 0) {
             epoll_event events[256];
             const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
                 deadline - Clock::now()
@@ -183,28 +179,24 @@ public:
                 const auto found = client_by_fd_.find(fd);
                 if (found == client_by_fd_.end()) continue;
                 Client& client = clients_[found->second];
-                const uint32_t flags = events[i].events;
-
-                if (client.connecting && (flags & (EPOLLOUT | EPOLLERR | EPOLLHUP))) {
-                    finishConnect(client);
+                if (events[i].events & EPOLLERR) {
+                    handleSocketError(client);
+                    continue;
                 }
-                if (!client.connected) continue;
 
-                if (flags & EPOLLOUT) {
-                    if (!flushClient(client)) {
-                        disconnect(client, true);
-                        continue;
+                if (events[i].events & EPOLLOUT) {
+                    if (options_.rate_per_second == 0) {
+                        sendBurst(client);
+                    } else if (client.pending) {
+                        sendPending(client);
                     }
-                }
-                if (flags & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) {
-                    disconnect(client, true);
                 }
             }
         }
 
         const auto ended = Clock::now();
         printStatistics(started, ended);
-        return statistics_.connect_failures == 0 && statistics_.connection_errors == 0 ? 0 : 1;
+        return statistics_.client_failures == 0 && statistics_.send_errors == 0 ? 0 : 1;
     }
 
 private:
@@ -214,8 +206,7 @@ private:
     std::vector<Client> clients_;
     std::unordered_map<int, std::size_t> client_by_fd_;
     Statistics statistics_;
-    uint64_t active_connections_ = 0;
-    uint64_t pending_connections_ = 0;
+    uint64_t active_clients_ = 0;
     std::size_t next_rate_client_ = 0;
 
     void configureRateTimer() {
@@ -235,10 +226,10 @@ private:
         }
     }
 
-    void connectClients() {
+    void createClients() {
         addrinfo hints{};
         hints.ai_family = AF_UNSPEC;
-        hints.ai_socktype = SOCK_STREAM;
+        hints.ai_socktype = SOCK_DGRAM;
         addrinfo* addresses = nullptr;
         const int resolve_error = getaddrinfo(options_.host.c_str(), options_.port.c_str(),
                                               &hints, &addresses);
@@ -249,42 +240,31 @@ private:
         clients_.reserve(static_cast<std::size_t>(options_.clients));
         for (uint64_t i = 0; i < options_.clients; ++i) {
             int fd = -1;
-            int connect_error = 0;
             for (addrinfo* address = addresses; address != nullptr; address = address->ai_next) {
-                fd = socket(address->ai_family, address->ai_socktype | SOCK_NONBLOCK | SOCK_CLOEXEC,
+                fd = socket(address->ai_family,
+                            address->ai_socktype | SOCK_NONBLOCK | SOCK_CLOEXEC,
                             address->ai_protocol);
                 if (fd < 0) {
-                    connect_error = errno;
                     continue;
                 }
                 if (connect(fd, address->ai_addr, address->ai_addrlen) == 0) {
-                    connect_error = 0;
                     break;
                 }
-                if (errno == EINPROGRESS) {
-                    connect_error = EINPROGRESS;
-                    break;
-                }
-                connect_error = errno;
                 close(fd);
                 fd = -1;
             }
 
             if (fd < 0) {
-                ++statistics_.connect_failures;
+                ++statistics_.client_failures;
                 continue;
             }
 
             Client client;
             client.fd = fd;
+            client.active = true;
             client.random_state = 0x9e3779b97f4a7c15ULL ^ (i + 1);
             if (client.random_state == 0) client.random_state = 1;
-            client.connecting = connect_error == EINPROGRESS;
-            client.connected = connect_error == 0;
-            client.epoll_events = EPOLLRDHUP;
-            if (client.connecting || options_.rate_per_second == 0) {
-                client.epoll_events |= EPOLLOUT;
-            }
+            client.epoll_events = options_.rate_per_second == 0 ? EPOLLOUT : 0;
 
             epoll_event event{};
             event.events = client.epoll_events;
@@ -299,36 +279,13 @@ private:
             const std::size_t index = clients_.size();
             clients_.push_back(client);
             client_by_fd_.emplace(fd, index);
-            if (client.connecting) {
-                ++pending_connections_;
-            } else {
-                ++active_connections_;
-                if (options_.rate_per_second == 0) beginMessage(clients_.back());
-            }
+            ++active_clients_;
         }
 
         freeaddrinfo(addresses);
-        std::cout << "Requested " << options_.clients << " clients; "
-                  << active_connections_ << " connected, " << pending_connections_
-                  << " connecting, " << statistics_.connect_failures << " failed immediately.\n";
-    }
-
-    void finishConnect(Client& client) {
-        int error = 0;
-        socklen_t length = sizeof(error);
-        if (getsockopt(client.fd, SOL_SOCKET, SO_ERROR, &error, &length) < 0) error = errno;
-        client.connecting = false;
-        --pending_connections_;
-        if (error != 0) {
-            ++statistics_.connect_failures;
-            disconnect(client, false);
-            return;
-        }
-
-        client.connected = true;
-        ++active_connections_;
-        if (options_.rate_per_second == 0) beginMessage(client);
-        else updateInterest(client, EPOLLRDHUP);
+        std::cout << "Requested " << options_.clients << " UDP clients; "
+                  << active_clients_ << " ready, " << statistics_.client_failures
+                  << " failed to initialize.\n";
     }
 
     void beginMessage(Client& client) {
@@ -345,39 +302,38 @@ private:
             std::memcpy(client.message.payload + offset, &random_value, sizeof(random_value));
         }
         client.message.flags = static_cast<uint8_t>(client.message.id & 0xff);
-        client.offset = 0;
         client.pending = true;
     }
 
-    bool flushClient(Client& client) {
-        std::size_t written_this_event = 0;
-        while (client.pending && written_this_event < write_budget) {
-            const auto* bytes = reinterpret_cast<const uint8_t*>(&client.message);
-            const ssize_t sent = send(client.fd, bytes + client.offset,
-                                      sizeof(client.message) - client.offset, MSG_NOSIGNAL);
-            if (sent > 0) {
-                const auto count = static_cast<std::size_t>(sent);
-                client.offset += count;
-                written_this_event += count;
-                statistics_.sent_bytes += count;
-                if (client.offset == sizeof(client.message)) {
-                    ++statistics_.completed_frames;
-                    client.pending = false;
-                    client.offset = 0;
-                    if (options_.rate_per_second == 0) beginMessage(client);
-                }
-                continue;
+    bool sendPending(Client& client) {
+        while (true) {
+            const ssize_t sent = send(client.fd, &client.message, sizeof(client.message), MSG_NOSIGNAL);
+            if (sent == static_cast<ssize_t>(sizeof(client.message))) {
+                ++statistics_.sent_datagrams;
+                statistics_.sent_bytes += static_cast<uint64_t>(sent);
+                client.pending = false;
+                if (options_.rate_per_second != 0) updateInterest(client, 0);
+                return true;
             }
             if (sent < 0 && errno == EINTR) continue;
-            if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return true;
-            if (sent == 0) errno = EPIPE;
+            if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                if (options_.rate_per_second != 0) updateInterest(client, EPOLLOUT);
+                return true;
+            }
+            if (sent >= 0) errno = EIO;
+            failClient(client, errno);
             return false;
         }
+    }
 
-        if (options_.rate_per_second != 0 && !client.pending) {
-            updateInterest(client, EPOLLRDHUP);
+    void sendBurst(Client& client) {
+        if (client.pending && !sendPending(client)) return;
+        if (client.pending) return;
+        for (std::size_t i = 0; i < datagram_budget && client.active; ++i) {
+            beginMessage(client);
+            if (!sendPending(client)) return;
+            if (client.pending) return;
         }
-        return true;
     }
 
     void handleRateTimer() {
@@ -399,14 +355,13 @@ private:
 
             Client& client = clients_[next_rate_client_];
             next_rate_client_ = (next_rate_client_ + 1) % clients_.size();
-            if (!client.connected || client.pending) {
+            if (!client.active || client.pending) {
                 ++statistics_.skipped_rate_slots;
                 continue;
             }
 
             beginMessage(client);
-            updateInterest(client, EPOLLRDHUP | EPOLLOUT);
-            if (!flushClient(client)) disconnect(client, true);
+            if (!sendPending(client)) continue;
         }
     }
 
@@ -421,9 +376,17 @@ private:
         client.epoll_events = events;
     }
 
-    void disconnect(Client& client, bool count_error) {
-        if (client.fd < 0) return;
-        if (count_error) ++statistics_.connection_errors;
+    void handleSocketError(Client& client) {
+        int error = 0;
+        socklen_t length = sizeof(error);
+        if (getsockopt(client.fd, SOL_SOCKET, SO_ERROR, &error, &length) < 0) error = errno;
+        failClient(client, error == 0 ? EIO : error);
+    }
+
+    void failClient(Client& client, int error) {
+        if (!client.active) return;
+        ++statistics_.send_errors;
+        std::cerr << "UDP client socket failed: " << std::generic_category().message(error) << '\n';
         if (epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, client.fd, nullptr) < 0 &&
             errno != ENOENT && errno != EBADF) {
             throw std::system_error(errno, std::generic_category(), "epoll_ctl remove client");
@@ -431,33 +394,29 @@ private:
         client_by_fd_.erase(client.fd);
         close(client.fd);
         client.fd = -1;
-        if (client.connecting) {
-            client.connecting = false;
-            --pending_connections_;
-        }
-        if (client.connected) {
-            client.connected = false;
-            --active_connections_;
-        }
+        client.active = false;
+        client.pending = false;
+        --active_clients_;
     }
 
     void printStatistics(Clock::time_point started, Clock::time_point ended) const {
         const double seconds = std::chrono::duration<double>(ended - started).count();
-        const double frames_per_second = seconds > 0 ? statistics_.completed_frames / seconds : 0;
+        const double datagrams_per_second =
+            seconds > 0 ? statistics_.sent_datagrams / seconds : 0;
         const double mib_per_second = seconds > 0
             ? statistics_.sent_bytes / (1024.0 * 1024.0 * seconds)
             : 0;
 
-        std::cout << "\nLoad test finished after " << seconds << " seconds\n"
-                  << "  Frames fully sent: " << statistics_.completed_frames << '\n'
+        std::cout << "\nUDP load test finished after " << seconds << " seconds\n"
+                  << "  Datagrams sent: " << statistics_.sent_datagrams << '\n'
                   << "  Bytes accepted by local sockets: " << statistics_.sent_bytes << '\n'
-                  << "  Throughput: " << frames_per_second << " frames/s, "
+                  << "  Throughput: " << datagrams_per_second << " datagrams/s, "
                   << mib_per_second << " MiB/s\n"
-                  << "  Active connections at end: " << active_connections_ << '\n'
-                  << "  Connection failures: " << statistics_.connect_failures << '\n'
-                  << "  Connections closed/errors: " << statistics_.connection_errors << '\n';
+                  << "  Active UDP clients at end: " << active_clients_ << '\n'
+                  << "  Client setup failures: " << statistics_.client_failures << '\n'
+                  << "  UDP send errors: " << statistics_.send_errors << '\n';
         if (options_.rate_per_second != 0) {
-            std::cout << "  Rate-limit slots skipped (busy/disconnected clients or timer delay): "
+            std::cout << "  Rate-limit slots skipped (busy/failed clients or timer delay): "
                       << statistics_.skipped_rate_slots << '\n';
         }
     }

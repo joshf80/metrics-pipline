@@ -1,64 +1,57 @@
-# Real Time Metrics Pipeline
+# Event Pipeline
 
-A C++ TCP server for ingesting fixed-size metric messages.
+A C++ 23 project exploring how events can be, transported over UDP, validated, and eventually stored.
 
-## Architecture
+## Intended event flow
 
 ```text
-Clients → TCP → epoll-based server → message framing → message handler
+Event source
+  → construct an Envelope
+  → encode the Envelope into a defined wire format
+  → send one UDP datagram
+  → receive and validate the datagram
+  → decode the Envelope
+  → dispatch the event
+  → persist or otherwise store it
 ```
 
-## Message format
 
-Messages use the `Message` struct defined in `include/message.hpp`.
+## Envelope model
 
-| Field | Size (bytes) |
-|---|---:|
-| `time` | 8 |
-| `type` | 4 |
-| `id` | 4 |
-| `payload` | 32 |
-| `flags` | 1 |
+[`include/message.hpp`](include/message.hpp) defines an `Envelope` containing:
 
-## Load generator
+| Field | Meaning |
+| --- | --- |
+| `sequence` | Sequence number for ordering and gap detection |
+| `sourceTsNs` | Event-source timestamp in nanoseconds |
+| `recieveTsNs` | Intended receive timestamp in nanoseconds |
+| `entityId` | Identifier for the affected entity |
+| `flags` | Event metadata flags |
+| `payload` | A tagged `std::variant` holding one event |
 
-`metrics-loadgen` opens concurrent nonblocking TCP connections and sends valid
-raw `Message` frames to the server. It uses `epoll` rather than one thread per
-connection, and reports completed frames, bytes accepted by local sockets,
-throughput, and connection failures. The server does not acknowledge messages,
-so these figures measure traffic sent, not confirmed server processing.
+The current payload alternatives are:
 
-Start the server in one terminal:
+| Event | Fields |
+| --- | --- |
+| `AddOrder` | Order reference, price, quantity, side |
+| `DeleteOrder` | Order reference |
+| `ExecOrder` | Order reference, executed quantity |
+
+Pretty similar to financial data pipelines, used for the sake of data ingestion simulation - will eventually broaden scope based on different message formats.
+
+
+## Current implementation status
+
+- The server creates a nonblocking  socket, registers it with `epoll`, and
+  drains available datagrams.
+- The handler currently performs no event processing or storage.
+
+
+## Build and tests
+
+The Clang CMake preset writes build files to `out/build/clang`:
 
 ```sh
-cmake --build build-clang --target metrics-pipeline metrics-loadgen
-./build-clang/metrics-pipeline
-```
-
-In another terminal, run a maximum-throughput test:
-
-```sh
-./build-clang/metrics-loadgen --host 127.0.0.1 --port 9000 \
-  --clients 1000 --duration 60
-```
-
-On systems with a low open-file limit, raise the limit in both the server and
-load-generator terminals before starting them (for example, `ulimit -n 10000`).
-The limit must accommodate the listening/epoll descriptors and every client
-socket. Linux also clamps the listen backlog to its `net.core.somaxconn` limit.
-
-To offer a rate-limited total traffic rate instead, add `--rate`:
-
-```sh
-./build-clang/metrics-loadgen --clients 1000 --duration 60 --rate 50000
-```
-
-Options are `--host`, `--port`, `--clients`, `--duration`, and `--rate`;
-`--help` prints defaults and usage. Omitting `--rate` runs at maximum
-throughput.]
-
-Run tests from the build directory with:
-
-```sh
-ctest --test-dir build-clang --output-on-failure
-```
+cmake --preset clang
+cmake --build out/build/clang
+ctest --test-dir out/build/clang --output-on-failure

@@ -1,4 +1,4 @@
-#include "tcp_server.hpp"
+#include "server.hpp"
 #include "message.hpp"
 #include "message_framing.hpp"
 #include "common.hpp"
@@ -6,6 +6,7 @@
 #include <sys/socket.h>
 #include <sys/epoll.h>
 #include <netinet/in.h>
+#include <netinet/udp.h>
 #include <arpa/inet.h>
 #include <cerrno>
 #include <cstdint>
@@ -14,7 +15,6 @@
 #include <string>
 #include <unistd.h>
 #include <string_view>
-#include <unordered_map>
 #include <limits>
 #include <stdexcept>
 #include "simdjson.h"
@@ -100,27 +100,28 @@ Options loadOptions(std::string_view path) {
     return options;
 }
 
-static inline void handle_event(const Message& m, uint64_t& sink) {
-    for(uint8_t i = 0; i < sizeof(m.payload); ++i) {
-        sink += m.payload[i];
-    }
+static inline void handle_event(const Envelope& m, uint64_t& sink) {
+    sink += 0; 
 }
 
-static std::pair<int, int> make_listener(uint16_t port) {
-    int fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
-    if (fd < 0) die("socket");
+[[nodiscard]] static std::pair<int, int> make_listener(uint16_t port) {
+    int fd = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    if (fd < 0) { die("socket"); }
 
     struct sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
     addr.sin_addr.s_addr = INADDR_ANY;
 
+    int enable = 1;
+    int rcvbuf = 4 *1024 * 1024;
+
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(enable));
+    setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &enable, sizeof(enable));
+    setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+
     if (bind(fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
         die("bind");
-    }
-
-    if (listen(fd, SOMAXCONN) < 0) {
-        die("listen");
     }
 
     int epollfd = epoll_create1(0); 
@@ -129,7 +130,7 @@ static std::pair<int, int> make_listener(uint16_t port) {
     }
 
     epoll_event ev{};
-    ev.events = EPOLLIN;
+    ev.events = EPOLLIN | EPOLLET;
     ev.data.fd = fd;
     if(epoll_ctl(epollfd, EPOLL_CTL_ADD, fd, &ev) < 0) {
         die("epoll_ctl");
@@ -146,92 +147,47 @@ struct SpscQueueSelection {};
 
 template <typename QueueSelection>
 void runTcpServerWithQueue(const Options& options) {
+    constexpr int MaxEvents = 128;
     std::pair<int, int> listener = make_listener(options.port);
     int epollfd = listener.first;
-    int listenfd = listener.second;
 
-    epoll_event events[128];
-    std::unordered_map<int, message_framing::Buffer> client_buffers;
+    epoll_event events[MaxEvents];
     uint64_t sink = 0;
 
     while(true) {
-        int nfds = epoll_wait(epollfd, events, 128, -1);
+        int nfds = epoll_wait(epollfd, events, MaxEvents, -1);
         if(nfds < 0) {
             if(errno == EINTR) continue;
             die("epoll_wait");
         }
-
         for(int i = 0; i < nfds; ++i) {
             int fd = events[i].data.fd;
-            if(fd == listenfd) {
-                while(true) {
-                    sockaddr_in clientAddr{};
-                    socklen_t addrlen = sizeof(clientAddr);
-                    int clientfd = accept4(
-                        listenfd,
-                        reinterpret_cast<sockaddr*>(&clientAddr),
-                        &addrlen,
-                        SOCK_NONBLOCK | SOCK_CLOEXEC
-                    );
 
-                    if(clientfd < 0) {
-                        if(errno == EINTR) continue;
-                        if(errno == EAGAIN || errno == EWOULDBLOCK) break;
-                        die("accept4");
-                    }
-
-                    epoll_event clientEvent{};
-                    clientEvent.events = EPOLLIN | EPOLLRDHUP;
-                    clientEvent.data.fd = clientfd;
-                    if(epoll_ctl(epollfd, EPOLL_CTL_ADD, clientfd, &clientEvent) < 0) {
-                        close(clientfd);
-                        die("epoll_ctl client");
-                    }
-                    client_buffers.emplace(clientfd, message_framing::Buffer{});
-                }
-                continue;
-            }
-
-            auto clientIt = client_buffers.find(fd);
-            if(clientIt == client_buffers.end()) continue;
-
-            bool closeClient = false;
             uint8_t received[4096];
             while(true) {
-                ssize_t nread = recv(fd, received, sizeof(received), 0);
+                ssize_t nread = recvfrom(fd, received, sizeof(received), MSG_DONTWAIT, nullptr, nullptr);
                 if(nread > 0) {
-                    auto& buffer = clientIt->second;
-                    buffer.append(
+                    const bool processed = message_framing::processDatagram(
                         received,
                         static_cast<std::size_t>(nread),
-                        [&sink](const Message& message) {
-                            handle_event(message, sink);
+                        [&sink](const Envelope& envelope) {
+                            handle_event(envelope, sink);
                         }
                     );
+                    if (!processed) {
+                        std::cerr << "Ignoring malformed UDP datagram of "
+                                  << nread << " bytes\n";
+                    }
                     continue;
                 }
 
                 if(nread == 0) {
-                    closeClient = true;
-                    break;
+                    std::cerr << "Ignoring empty UDP datagram\n";
+                    continue;
                 }
                 if(errno == EINTR) continue;
                 if(errno == EAGAIN || errno == EWOULDBLOCK) break;
-                perror("recv");
-                closeClient = true;
-                break;
-            }
-
-            if(events[i].events & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) {
-                closeClient = true;
-            }
-            if(closeClient) {
-                if(epoll_ctl(epollfd, EPOLL_CTL_DEL, fd, nullptr) < 0 &&
-                   errno != ENOENT && errno != EBADF) {
-                    perror("epoll_ctl remove client");
-                }
-                close(fd);
-                client_buffers.erase(clientIt);
+                die("recvfrom issue");
             }
         }
     }

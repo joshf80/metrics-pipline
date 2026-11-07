@@ -20,7 +20,7 @@ set(METRICS_OPTIONS_FILE "${CMAKE_CURRENT_SOURCE_DIR}/config/options.json")
 
 set(SOURCES 
     src/main.cpp
-    src/tcp_server.cpp
+    src/server.cpp
     src/thread_pool.cpp
 )
 
@@ -30,9 +30,6 @@ target_compile_definitions(metrics-pipeline PRIVATE
     METRICS_OPTIONS_FILE="${METRICS_OPTIONS_FILE}"
 )
 target_compile_options(metrics-pipeline PRIVATE -Wall -Wextra -Wpedantic)
-if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
-    target_compile_options(metrics-pipeline PRIVATE -std=c++2c)
-endif()
 target_link_libraries(metrics-pipeline PRIVATE simdjson)
 
 add_executable(metrics-loadgen tests/simulator.cpp)
