@@ -16,7 +16,7 @@ bool check(bool condition, const char* message) {
     return true;
 }
 
-std::array<uint8_t, message_framing::frame_size> datagramFor(const Message& message) {
+std::array<uint8_t, message_framing::frame_size> datagramFor(const Envelope& message) {
     std::array<uint8_t, message_framing::frame_size> datagram{};
     std::memcpy(datagram.data(), &message, datagram.size());
     return datagram;
@@ -25,16 +25,16 @@ std::array<uint8_t, message_framing::frame_size> datagramFor(const Message& mess
 } // namespace
 
 int main() {
-    Message first{};
-    first.id = 11;
-    Message second{};
-    second.id = 22;
+    Envelope first{};
+    first.sequence = 11;
+    Envelope second{};
+    second.sequence = 22;
 
     const auto firstDatagram = datagramFor(first);
     const auto secondDatagram = datagramFor(second);
     std::vector<uint32_t> processed;
-    const auto record = [&processed](const Message& message) {
-        processed.push_back(message.id);
+    const auto record = [&processed](const Envelope& message) {
+        processed.push_back(message.sequence);
     };
 
     if (!check(message_framing::processDatagram(firstDatagram.data(), firstDatagram.size(), record),
@@ -51,8 +51,8 @@ int main() {
     }
 
     std::vector<uint32_t> perClient;
-    const auto recordPerClient = [&perClient](const Message& message) {
-        perClient.push_back(message.id);
+    const auto recordPerClient = [&perClient](const Envelope& message) {
+        perClient.push_back(message.sequence);
     };
 
     if (!check(message_framing::processDatagram(firstDatagram.data(), firstDatagram.size(),

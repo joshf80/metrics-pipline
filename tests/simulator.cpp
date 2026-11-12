@@ -25,7 +25,7 @@
 namespace {
 
 using Clock = std::chrono::steady_clock;
-constexpr std::size_t datagram_budget = 256 * 1024 / sizeof(Message);
+constexpr std::size_t datagram_budget = 256 * 1024 / sizeof(Envelope);
 constexpr uint64_t max_timer_expirations_per_wakeup = 10'000;
 
 struct Options {
@@ -43,7 +43,7 @@ struct Client {
     uint32_t next_id = 0;
     uint64_t random_state = 1;
     uint32_t epoll_events = 0;
-    Message message{};
+    Envelope message{};
 };
 
 struct Statistics {
@@ -289,19 +289,18 @@ private:
     }
 
     void beginMessage(Client& client) {
-        client.message = Message{};
-        client.message.time = static_cast<uint64_t>(
+        client.message = Envelope{};
+        client.message.sourceTsNs = static_cast<uint64_t>(
             std::chrono::duration_cast<std::chrono::nanoseconds>(
                 Clock::now().time_since_epoch()
             ).count()
         );
-        client.message.type = 1;
-        client.message.id = client.next_id++;
+        client.message.entityId = 1;
+        client.message.sequence = client.next_id++;
         for (std::size_t offset = 0; offset < sizeof(client.message.payload); offset += sizeof(uint64_t)) {
             const uint64_t random_value = nextRandom(client.random_state);
-            std::memcpy(client.message.payload + offset, &random_value, sizeof(random_value));
         }
-        client.message.flags = static_cast<uint8_t>(client.message.id & 0xff);
+        client.message.flags = static_cast<uint8_t>(client.message.sequence & 0xff);
         client.pending = true;
     }
 

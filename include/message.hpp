@@ -3,18 +3,18 @@
 #include <cstdint>
 #include <variant>
 
-struct AddOrder { 
+struct AddMessage { 
     uint64_t orderRef;
     uint32_t price;
     uint32_t qty;
     char side;
 };
 
-struct DeleteOrder {
+struct DeleteMessage {
     uint64_t orderRef;
 };
 
-struct ExecOrder {
+struct ExecMessage {
     uint64_t orderRef;
     uint64_t qty;
 };
@@ -25,5 +25,5 @@ struct Envelope {
     uint64_t recieveTsNs;
     uint32_t entityId;
     uint16_t flags;
-    std::variant<AddOrder, DeleteOrder, ExecOrder> payload;
+    std::variant<AddMessage, DeleteMessage, ExecMessage> payload;
 };

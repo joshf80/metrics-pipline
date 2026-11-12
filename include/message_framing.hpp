@@ -8,7 +8,7 @@
 
 namespace message_framing {
 
-inline constexpr std::size_t frame_size = sizeof(Message);
+inline constexpr std::size_t frame_size = sizeof(Envelope);
 
 template <typename Handler>
 bool processDatagram(const uint8_t* data, std::size_t size, Handler&& handle) {

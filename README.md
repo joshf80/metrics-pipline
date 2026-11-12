@@ -33,9 +33,9 @@ The current payload alternatives are:
 
 | Event | Fields |
 | --- | --- |
-| `AddOrder` | Order reference, price, quantity, side |
-| `DeleteOrder` | Order reference |
-| `ExecOrder` | Order reference, executed quantity |
+| `AddMessage` | Message  reference, price, quantity, side |
+| `DeleteMessage` | Message reference |
+| `ExecMessage` | Message reference, executed quantity |
 
 Pretty similar to financial data pipelines, used for the sake of data ingestion simulation - will eventually broaden scope based on different message formats.
 
