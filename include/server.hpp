@@ -19,4 +19,4 @@ struct Options {
 };
 
 Options loadOptions(std::string_view path);
-void runTcpServer(const Options& options);
+void runServer(const Options& options);

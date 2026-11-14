@@ -2,7 +2,6 @@
 #include "message.hpp"
 #include "message_framing.hpp"
 #include "common.hpp"
-
 #include <sys/socket.h>
 #include <sys/epoll.h>
 #include <netinet/in.h>
@@ -18,6 +17,7 @@
 #include <limits>
 #include <stdexcept>
 #include "simdjson.h"
+#include <span>
 
 Options loadOptions(std::string_view path) {
     simdjson::dom::parser parser;
@@ -114,7 +114,7 @@ static inline void handle_event(const Envelope& m, uint64_t& sink) {
     addr.sin_addr.s_addr = INADDR_ANY;
 
     int enable = 1;
-    int rcvbuf = 4 *1024 * 1024;
+    int rcvbuf = 4 * 1024 * 1024;
 
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(enable));
     setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &enable, sizeof(enable));
@@ -146,7 +146,7 @@ struct MutexQueueSelection {};
 struct SpscQueueSelection {};
 
 template <typename QueueSelection>
-void runTcpServerWithQueue(const Options& options) {
+void runServerWithQueue(const Options& options) {
     constexpr int MaxEvents = 128;
     std::pair<int, int> listener = make_listener(options.port);
     int epollfd = listener.first;
@@ -163,21 +163,18 @@ void runTcpServerWithQueue(const Options& options) {
         for(int i = 0; i < nfds; ++i) {
             int fd = events[i].data.fd;
 
-            uint8_t received[4096];
+            std::array<std::byte, 1024> buffer; 
+
             while(true) {
-                ssize_t nread = recvfrom(fd, received, sizeof(received), MSG_DONTWAIT, nullptr, nullptr);
+                ssize_t nread = recvfrom(fd, buffer.data(), buffer.size(), MSG_DONTWAIT, nullptr, nullptr);
                 if(nread > 0) {
-                    const bool processed = message_framing::processDatagram(
-                        received,
-                        static_cast<std::size_t>(nread),
+                    std::span<std::byte> view(buffer.first(nread));
+                    const bool processed = message_framing::processDatagram(view, static_cast<std::size_t>(nread),
                         [&sink](const Envelope& envelope) {
                             handle_event(envelope, sink);
-                        }
-                    );
-                    if (!processed) {
-                        std::cerr << "Ignoring malformed UDP datagram of "
-                                  << nread << " bytes\n";
-                    }
+                        });
+
+                    if (!processed) { std::cerr << "Ignoring malformed UDP datagram of " << nread << " bytes\n"; }
                     continue;
                 }
 
@@ -185,6 +182,7 @@ void runTcpServerWithQueue(const Options& options) {
                     std::cerr << "Ignoring empty UDP datagram\n";
                     continue;
                 }
+            
                 if(errno == EINTR) continue;
                 if(errno == EAGAIN || errno == EWOULDBLOCK) break;
                 die("recvfrom issue");
@@ -195,13 +193,13 @@ void runTcpServerWithQueue(const Options& options) {
 
 }
 
-void runTcpServer(const Options& options) {
+void runServer(const Options& options) {
     switch (options.queue) {
         case QueueImplementation::mutex:
-            runTcpServerWithQueue<MutexQueueSelection>(options);
+            runServerWithQueue<MutexQueueSelection>(options);
             return;
         case QueueImplementation::spsc:
-            runTcpServerWithQueue<SpscQueueSelection>(options);
+            runServerWithQueue<SpscQueueSelection>(options);
             return;
     }
 
