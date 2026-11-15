@@ -12,7 +12,6 @@
 #include <cstdlib>
 #include <iostream>
 #include <string>
-#include <unistd.h>
 #include <string_view>
 #include <limits>
 #include <stdexcept>
@@ -153,6 +152,7 @@ void runServerWithQueue(const Options& options) {
 
     epoll_event events[MaxEvents];
     uint64_t sink = 0;
+    std::cout << "Size of Message " << sizeof(Envelope) << '\n';
 
     while(true) {
         int nfds = epoll_wait(epollfd, events, MaxEvents, -1);
@@ -168,8 +168,8 @@ void runServerWithQueue(const Options& options) {
             while(true) {
                 ssize_t nread = recvfrom(fd, buffer.data(), buffer.size(), MSG_DONTWAIT, nullptr, nullptr);
                 if(nread > 0) {
-                    std::span<std::byte> view(buffer.first(nread));
-                    const bool processed = message_framing::processDatagram(view, static_cast<std::size_t>(nread),
+                    std::span<const std::byte> view{buffer.data(), static_cast<std::size_t>(nread)};
+                    const bool processed = message_framing::processDatagram(view,
                         [&sink](const Envelope& envelope) {
                             handle_event(envelope, sink);
                         });

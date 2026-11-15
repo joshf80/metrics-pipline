@@ -23,19 +23,10 @@ Event source
 | Field | Meaning |
 | --- | --- |
 | `sequence` | Sequence number for ordering and gap detection |
-| `sourceTsNs` | Event-source timestamp in nanoseconds |
-| `recieveTsNs` | Intended receive timestamp in nanoseconds |
+| `sourceTs` | Event source timestamp in nanoseconds |
 | `entityId` | Identifier for the affected entity |
-| `flags` | Event metadata flags |
-| `payload` | A tagged `std::variant` holding one event |
-
-The current payload alternatives are:
-
-| Event | Fields |
-| --- | --- |
-| `AddMessage` | Message  reference, price, quantity, side |
-| `DeleteMessage` | Message reference |
-| `ExecMessage` | Message reference, executed quantity |
+| `flags` | Event flags |
+| `payload` | Tag holding one event |
 
 Pretty similar to financial data pipelines, used for the sake of data ingestion simulation - will eventually broaden scope based on different message formats.
 

@@ -290,7 +290,7 @@ private:
 
     void beginMessage(Client& client) {
         client.message = Envelope{};
-        client.message.sourceTsNs = static_cast<uint64_t>(
+        client.message.sourceTs = static_cast<uint64_t>(
             std::chrono::duration_cast<std::chrono::nanoseconds>(
                 Clock::now().time_since_epoch()
             ).count()
