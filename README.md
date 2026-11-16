@@ -1,42 +1,33 @@
 # Event Pipeline
 
-A C++ 23 project exploring how events can be, transported over UDP, validated, and eventually stored.
+A C++23 project exploring UDP event ingestion. The current server receives
+datagrams and validates their framing; event processing and storage are not
+implemented yet.
 
-## Intended event flow
+## Message format
 
-```text
-Event source
-  → construct an Envelope
-  → encode the Envelope into a defined wire format
-  → send one UDP datagram
-  → receive and validate the datagram
-  → decode the Envelope
-  → dispatch the event
-  → persist or otherwise store it
-```
+[`include/message.hpp`](include/message.hpp) defines the fixed-size `Envelope`:
 
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `version` | `uint8_t` | Message format version |
+| `sequence` | `uint64_t` | Sequence number |
+| `type` | `MessageType` | Category: `metric`, `event`, or `log` |
+| `entityId` | `uint32_t` | Identifier for the affected entity  |
+| `sourceTs` | `uint64_t` | Source timestamp in nanoseconds |
 
-## Envelope model
-
-[`include/message.hpp`](include/message.hpp) defines an `Envelope` containing:
-
-| Field | Meaning |
-| --- | --- |
-| `sequence` | Sequence number for ordering and gap detection |
-| `sourceTs` | Event source timestamp in nanoseconds |
-| `entityId` | Identifier for the affected entity |
-| `flags` | Event flags |
-| `payload` | Tag holding one event |
-
-Pretty similar to financial data pipelines, used for the sake of data ingestion simulation - will eventually broaden scope based on different message formats.
+[`include/message_framing.hpp`](include/message_framing.hpp) defines the current
+datagram contract: a datagram is accepted only when its size exactly matches
+`sizeof(Envelope)`. Accepted bytes are copied into an `Envelope` and passed to
+the handler. Truncated, oversized, or empty datagrams are rejected.
 
 
-## Current implementation status
+## Current implementation
 
-- The server creates a nonblocking  socket, registers it with `epoll`, and
+- The server creates a nonblocking UDP socket, registers it with `epoll`, and
   drains available datagrams.
+- Valid datagrams are decoded as one `Envelope`
 - The handler currently performs no event processing or storage.
-
 
 ## Build and tests
 
@@ -46,3 +37,4 @@ The Clang CMake preset writes build files to `out/build/clang`:
 cmake --preset clang
 cmake --build out/build/clang
 ctest --test-dir out/build/clang --output-on-failure
+```

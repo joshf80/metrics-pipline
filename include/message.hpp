@@ -3,12 +3,16 @@
 #include <cstdint>
 #include <type_traits>
 
-struct Envelope {
-    uint64_t sequence;
-    uint64_t sourceTs;
-    uint32_t entityId;
-    uint16_t flags;
-    uint64_t payload;
+enum class MessageType : uint8_t {
+    metric = 1,
+    event = 2,
+    log = 3
 };
 
-static_assert(std::is_trivially_copyable_v<Envelope>, "Envelope must be trivially copyable");
+struct Envelope {
+    uint8_t version;
+    uint64_t sequence;
+    MessageType type;
+    uint32_t entityId;
+    uint64_t sourceTs;
+};
